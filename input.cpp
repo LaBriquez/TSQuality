@@ -5,16 +5,9 @@
 
 namespace TSUtil {
     float median(const std::vector<float>& values) {
-        if (values.empty())
-            return 0.0f;
-        
-        size_t n = values.size();
-        //std::sort(values.begin(), values.end());
-
-        if (n % 2 == 0)
-            return (values[n / 2 - 1] + values[n / 2]) / 2.0f;
-        else
-            return values[n / 2];
+        return values.empty()? 0.0f : values.size() % 2 == 0? 
+                ((values[values.size() / 2 - 1] + values[values.size() / 2]) * 0.5f) : 
+                values[values.size() / 2];
     }
 
     float mad(const std::vector<float>& values) {
@@ -32,10 +25,7 @@ namespace TSUtil {
     }
 
     void variation(const std::vector<float>& origin, std::vector<float>& variance) {
-        if (origin.empty())
-            return;
-        
-        if (origin.size() < 2)
+        if (origin.empty() || origin.size() < 2)
             return;
 
         variance.resize(origin.size() - 1);
@@ -90,11 +80,11 @@ public:
     static const int WINDOW_SIZE = 10;
     bool downtime = true;
 
-    unsigned int toPoints(TimePoint* points) {
+    void toPoints(std::vector<TimePoint>& points) {
+        points.resize(time.size());
+
         for (unsigned int i = 0; i < time.size(); i++)
             points[i] = {time[i], origin[i]};
-        
-        return time.size();
     }
 
     TimeSeriesQuality(std::vector<float>& timeData, std::vector<float>& originData)
@@ -232,7 +222,7 @@ public:
     }
 
     float getValidity() {
-        return 1.0f - (valueCnt + variationCnt + speedCnt + speedchangeCnt) * 0.25f / (float) cnt;
+        return ((valueCnt + variationCnt + speedCnt + speedchangeCnt) * 0.25f) / (float) cnt;
     }
 };
 
@@ -245,11 +235,11 @@ bool isFloat(const char* str) {
 bool processCsvData(const char* const data,
                     unsigned int dataLength,
                     bool header,
-                    char separator,
-                    std::vector<TimePoint>& points) {
+                    char separator, std::vector<std::vector<float>>& totalFloats, unsigned int& maxSize) {
     const char* start = data;
     const char* end = data + dataLength;
 
+    // Skip the header if present
     if (header) {
         while (start < end && *start != '\n') ++start;
         if (start < end) ++start;
@@ -260,67 +250,99 @@ bool processCsvData(const char* const data,
         const char* line = start;
         start = lineEnd < end ? lineEnd + 1 : end;
 
+        std::vector<float> floats;
 
-        const char* col1 = line;
-        const char* col1End = std::find(line, lineEnd, separator);
-        if (col1End == lineEnd) return false;
+        while (line < lineEnd) {
+            const char* colEnd = std::find(line, lineEnd, separator);
+            std::string value(line, colEnd - line);
 
-        const char* col2 = col1End + 1;
-        const char* col2End = std::find(col2, lineEnd, separator);
+            if (isFloat(value.c_str())) {
+                floats.push_back(std::strtof(value.c_str(), nullptr));
+            } else if (!value.empty()) {
+                return false;
+            }
 
-        if (col2End != lineEnd) return false;
+            line = colEnd < lineEnd ? colEnd + 1 : lineEnd;
+        }
+        
+        if (maxSize < floats.size())
+            maxSize = floats.size();
 
-        std::string value1(col1, col1End - col1);
-        std::string value2(col2, lineEnd - col2);
-
-        if (!isFloat(value1.c_str()) || !isFloat(value2.c_str()))
-            return false;
-
-        float time = std::strtof(value1.c_str(), nullptr);
-        float origin = std::strtof(value2.c_str(), nullptr);
-
-        points.push_back({time, origin});
+        totalFloats.push_back(floats);
     }
 
     return true;
 }
 
-extern "C" unsigned int process(const char* const data,
+bool processCSV(const char* data, unsigned int dataLen, bool header,
+                    char separator, std::vector<std::vector<TimePoint>>& timePoints) {
+    std::vector<std::vector<float>> floats;
+    unsigned int maxSize = 0;
+
+    if (!processCsvData(data, dataLen, header, separator, floats, maxSize))
+        return false;
+
+    timePoints.resize(maxSize - 1);
+    
+    for (auto& arr : floats) {
+        for (unsigned int i = 0; i < timePoints.size(); i++) {
+            timePoints[i].push_back({arr[0], i + 1 < arr.size()? arr[i + 1] : NAN});
+        }
+    }
+
+    return true;
+}
+
+extern "C" bool process(const char* const data,
             unsigned int dataLength,
             bool header,
             char separator,
-            DataQuality* quality,
-            TimePoint* resPoints, TimePoint* originalPoints) {
-    std::vector<TimePoint> points;
+            DataQuality* qualitys,
+            DataQuality* qualitysOrigins,
+            TimePoint* origins,
+            TimePoint* c_points) {
+    
+    std::vector<std::vector<TimePoint>> timespoints;
 
-    if (!processCsvData(data, dataLength, header, separator, points)) {
-        return 0;
+    if (!processCSV(data, dataLength, header, separator, timespoints)) {
+        return false;
     }
 
-    std::sort(points.begin(), points.end());
+    unsigned int cpt = 0;
+    
+    for (unsigned int j = 0; j < timespoints.size(); j++) {
+        std::vector<TimePoint>& points = timespoints[j];
+        
+        std::sort(points.begin(), points.end());
 
-    std::vector<float> time(points.size(), 0.0f);
-    std::vector<float> origin(points.size(), 0.0f);
+        std::vector<float> time(points.size(), 0.0f);
+        std::vector<float> origin(points.size(), 0.0f);
 
-    for (unsigned int i = 0; i < points.size(); i++) {
-        time[i] = points[i].time;
-        origin[i] = points[i].origin;
+        for (unsigned int i = 0; i < points.size(); i++) {
+            time[i] = points[i].time;
+            origin[i] = points[i].origin;
+        }
+        
+        TimeSeriesQuality timeSeries{time, origin};
+        TimeSeriesQuality TSorigin{time, origin};
+
+        timeSeries.timeDetect();
+
+        TSorigin.valueDetect();
+
+        qualitys[j] = {timeSeries.getCompleteness(), timeSeries.getConsistency(), timeSeries.getTimeliness(), timeSeries.getValidity()};
+        qualitysOrigins[j] = {TSorigin.getCompleteness(), TSorigin.getConsistency(), TSorigin.getTimeliness(), TSorigin.getValidity()};
+
+        std::vector<TimePoint> newPoints;
+
+        timeSeries.toPoints(newPoints);
+
+        for (unsigned int i = 0; i < newPoints.size(); i++) {
+            origins[cpt] = {time[i], origin[i]};
+            c_points[cpt] = newPoints[i];
+            cpt++;
+        }
     }
     
-    TimeSeriesQuality timeSeries{time, origin};
-
-    timeSeries.timeDetect();
-    timeSeries.valueDetect();
-
-    quality->completeness = timeSeries.getCompleteness();
-    quality->consistency = timeSeries.getConsistency();
-    quality->validity = timeSeries.getValidity();
-    quality->timeliness = timeSeries.getTimeliness();
-
-    unsigned int pointsSize = timeSeries.toPoints(resPoints);
-
-    for (size_t i = 0; i < points.size(); i++)
-        originalPoints[i] = points[i];
-    
-    return pointsSize;
+    return true;
 }
