@@ -294,13 +294,9 @@ bool processCSV(const char* data, unsigned int dataLen, bool header,
 }
 
 extern "C" bool process(const char* const data,
-            unsigned int dataLength,
-            bool header,
-            char separator,
-            DataQuality* qualitys,
-            DataQuality* qualitysOrigins,
-            TimePoint* origins,
-            TimePoint* c_points) {
+            unsigned int dataLength, bool header, char separator,
+            DataQuality* qualitys, DataQuality* qualitysOrigins,
+            TimePoint* origins, TimePoint* c_points) {
     
     std::vector<std::vector<TimePoint>> timespoints;
 
