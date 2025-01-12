@@ -75,19 +75,19 @@ function setGraphs(barChart, lineChart, barData, lineData) {
 onload = async () => {
     const {free, malloc, memory, process} = (await WebAssembly.instantiate(await (await fetch('output.wasm')).arrayBuffer())).instance.exports;
 
-    const analyseFile = (dataSet, separator, header) => {
-        const csvData = dataSet.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, 
-            (match, year, month, day) => new Date(`${year}-${month}-${day}`).getTime().toString())
-            .toString();
+    const ptrNull = malloc(1);
 
+    console.log(ptrNull);
+
+    free(ptrNull);
+
+    const analyseFile = (csvData, separator, header) => {
         const dataLength = csvData.length;
     
-        const ptrData = malloc(dataLength);
+        let ptrData = malloc(dataLength);
         const csvMemory = new Uint8Array(memory.buffer, ptrData, dataLength);
     
         let counter = 0;
-        let counterSep = 0;
-        let maxSeparators = 0;
     
         for (let i = 0; i < dataLength; i++) {
             if (csvData.charCodeAt(i) !== 13) {
@@ -95,69 +95,55 @@ onload = async () => {
             } else {
                 counter++;
             }
-
-            if (csvData.charCodeAt(i) === separator) {
-                counterSep++;
-            }
-
-            if (csvData[i] === '\n' || i === dataLength - 1) {
-                maxSeparators = Math.max(maxSeparators, counterSep);
-                counterSep = 0;
-            }
         }
+    
+        /*console.log(csvData);
+        console.log(Array.from(csvMemory, d => String.fromCharCode(d)).join(''));*/
 
-        const TPSize = counter * maxSeparators;
+        let ptrQuality = malloc(16);
+        let resPointsPtr = malloc(counter * 8);
+        let originalPointsPtr = malloc(counter * 8);
 
-        const ptrQuality = malloc(16 * maxSeparators);
-        const ptrTSOrigin = malloc(16 * maxSeparators);
-        const ptrOriginPoints = malloc(TPSize * 8);
-        const ptrCorrPoints = malloc(TPSize * 8);
-
-        if (!process(ptrData, dataLength - 1, header, separator, ptrQuality, ptrTSOrigin,
-            ptrOriginPoints, ptrCorrPoints)) {
-            console.log("bad data");
-            
-            free(ptrData);
-            free(ptrQuality);
-            free(ptrTSOrigin);
-            free(ptrOriginPoints);
-            free(ptrCorrPoints);
-            return null;
+        console.log(ptrData, ptrQuality, resPointsPtr, originalPointsPtr);
+    
+        const resPointsLength = process(ptrData, dataLength, header, separator, ptrQuality, resPointsPtr, originalPointsPtr);
+    
+        const quality = new Float32Array(memory.buffer, ptrQuality, 4);
+        const dataQuality = {
+            completeness: quality[0], 
+            consistency: quality[1], 
+            timeliness: quality[2], 
+            validity: quality[3]
+        };
+    
+        const resPointsArray = new Float32Array(memory.buffer, resPointsPtr, resPointsLength * 2);
+        const originalPointsArray = new Float32Array(memory.buffer, originalPointsPtr, resPointsLength * 2);
+    
+        const origins = [];
+        const times = [];
+    
+        for (let i = 0; i < resPointsLength; i++) {
+            origins.push({ time: originalPointsArray[i * 2], origin: originalPointsArray[i * 2 + 1] });
+    
+            const time = resPointsArray[i * 2];
+            const origin = resPointsArray[i * 2 + 1];
+            times.push({ time, origin });
         }
-
-        const quality = new Float32Array(memory.buffer, ptrQuality, 4 * maxSeparators);
-        const TSOrigin = new Float32Array(memory.buffer, ptrTSOrigin, 4 * maxSeparators);
-
-        const originsPoints = new Float32Array(memory.buffer, ptrOriginPoints, TPSize * 2);
-        const corrPoints = new Float32Array(memory.buffer, ptrOriginPoints, TPSize * 2);
-
-        const qualitys = Array.from(
-            new Array(maxSeparators), 
-            (v, i) => {return {
-                completeness: quality[i * 4],
-                consistency: quality[i * 4 + 1],
-                timeliness: quality[i * 4 + 2],
-                validity: quality[i * 4 + 3],
-                values : {
-                    completeness: TSOrigin[i * 4],
-                    consistency: TSOrigin[i * 4 + 1],
-                    timeliness: TSOrigin[i * 4 + 2],
-                    validity: TSOrigin[i * 4 + 3],
-                },
-                origins: Array.from(new Array(counter), 
-                (_, j) => {return {time: originsPoints[(i * counter + j) * 2], origin: originsPoints[(i * counter + j) * 2 + 1]}}),
-                corrPoints: Array.from(new Array(counter), 
-                (_, j) => {return {time: corrPoints[(i * counter + j) * 2], origin: corrPoints[(i * counter + j) * 2 + 1]}})
-            }});
-
+    
         free(ptrData);
         free(ptrQuality);
-        free(ptrTSOrigin);
-        free(ptrOriginPoints);
-        free(ptrCorrPoints);
+        free(resPointsPtr);
+        free(originalPointsPtr);
 
-        return qualitys;
-    };
+        ptrData = 0;
+        ptrQuality = 0;
+        resPointsPtr = 0;
+        originalPointsPtr = 0;
+
+        console.log(ptrData, ptrQuality, resPointsPtr, originalPointsPtr);
+    
+        return { origins, times, dataQuality };
+    };    
 
     const fileInput = document.getElementById('fileInput');
     const global = document.getElementById('global');
@@ -169,66 +155,48 @@ onload = async () => {
             return;
         }
 
-        const promises = [];
+        global.innerHTML = `<h1 id="time_taken">time taken : </h1>` + Array.from(files, file => `<div class="file-name"><h1>${file.name}</h1></div>
+        <div class="chart-container">
+            <canvas class="barChart"></canvas>
+            <canvas class="lineChart"></canvas>
+        </div>`).join('');
 
-        for (let i = 0; i < files.length; i++) {
-            const promise = new Promise((resolve, reject) => {
-                const reader = new FileReader();
+        const charts = document.querySelectorAll(".chart-container");
+
+        const reader = new FileReader();
+
+        for (let i = 0; i < charts.length; i++) {
+            reader.onload = (res) => {
+                const t1 = performance.now();
+
+                const {origins, times, dataQuality} = analyseFile(res.target.result, ','.charCodeAt(0), true);
                 
-                reader.onload = (res) => {
-                    const qualitys = analyseFile(res.target.result, ','.charCodeAt(0), true);
-    
-                    if (!qualitys) {
-                        alert("bad data");
-                        return;
-                    }
-
-                    return resolve(Array.from(qualitys, (quality) => {return {
-                        completeness: quality.completeness,
-                        consistency: quality.consistency,
-                        timeliness: quality.timeliness,
-                        validity: quality.validity,
-                        values: quality.values,
-                        origins: quality.origins,
-                        corrPoints: quality.corrPoints,
-                        name: files[i].name
-                    }}));
-                };
+                const t2 = performance.now();
                 
-                reader.readAsText(files[i]);
-            });
+                document.getElementById("time_taken").innerText = `time taken : ${t2 - t1} ms`;
 
-            promises.push(promise);
-        }
-
-        Promise.all(promises)
-        .then((results) => {
-            let data = results.flat();
-
-            global.innerHTML = Array.from(data, file => `<div class="file-name"><h1>${file.name}</h1></div>
-                <div class="chart-container">
-                    <canvas class="barChart"></canvas>
-                    <canvas class="lineChart"></canvas>
-                </div>`).join('');
+                if (!origins.length) {
+                    alert("bad data");
+                    return;
+                }                
+                
+                setGraphs(charts[i].querySelector('.barChart'), charts[i].querySelector('.lineChart'),
+                            [
+                                {name: "Completeness", value: dataQuality.completeness},
+                                {name: "Consistency", value: dataQuality.consistency},
+                                {name: "Timeliness", value: dataQuality.timeliness},
+                                {name: "Validity", value: dataQuality.validity}
+                            ], {
+                                origins,
+                                times,
+                            });
+                
+                const t3 = performance.now();
+                
+                document.getElementById("time_taken").innerText = `time taken : ${t2 - t1} ms (${t3 - t1})`;
+            };
             
-            const charts = document.querySelectorAll(".chart-container");
-        
-            for (let i = 0; i < data.length; i++) {
-                setGraphs(charts[i].querySelector('.barChart'),
-                    charts[i].querySelector('.lineChart'),
-                    [
-                        {name: "Completeness", value: data[i].completeness},
-                        {name: "Consistency", value: data[i].consistency},
-                        {name: "Timeliness", value: data[i].timeliness},
-                        {name: "Validity", value: data[i].values.validity}
-                    ], {
-                        origins: data[i].origins,
-                        times: data[i].corrPoints,
-                    });
-            }
-        })
-        .catch((error) => {
-            console.error("Error reading files:", error);
-        });
+            reader.readAsText(fileInput.files[i]);
+        }        
     };
 };
